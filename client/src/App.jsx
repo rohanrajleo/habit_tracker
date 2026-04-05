@@ -20,6 +20,6 @@ function App() {
     </div>
   );
 }
-console.log("DATA FROM BACKEND:", data);
+
 
 export default App;
