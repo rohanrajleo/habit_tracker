@@ -4,10 +4,14 @@ function App() {
   const [data, setData] = useState([]);
 
   useEffect(() => {
-    fetch("http://localhost:3000/test-db")
-      .then(res => res.json())
-      .then(data => setData(data));
-  }, []);
+  fetch("https://habit-tracker-wbl6.onrender.com/test-db")
+    .then(res => res.json())
+    .then(data => {
+      console.log("DATA FROM BACKEND:", data); // 👈 ADD THIS
+      setData(data);
+    })
+    .catch(err => console.error(err));
+}, []);
 
   return (
     <div>
@@ -16,5 +20,6 @@ function App() {
     </div>
   );
 }
+console.log("DATA FROM BACKEND:", data);
 
 export default App;

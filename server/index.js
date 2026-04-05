@@ -25,5 +25,5 @@ app.get("/test-db", async (req, res) => {
 app.get("/ping", (req, res) => {
   res.json({ message: "backend working" });
 });
-fetch("http://localhost:3000/test-db");
+console.log("URL:", process.env.SUPABASE_URL);
 app.listen(3000, () => console.log("server running"));
