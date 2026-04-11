@@ -11,7 +11,7 @@ export default function AddSchedule() {
 
   const baseData = location.state?.habitData || {};
 
-  const [allowSkip, setAllowSkip] = useState(true);
+
   const [targetValue, setTargetValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -23,8 +23,8 @@ export default function AddSchedule() {
         description: baseData.description || null,
         type: baseData.type || 'binary',
         category: baseData.category || 'health',
-        allow_skip: allowSkip,
-        target_value: targetValue ? Number(targetValue) : null
+        target_value: targetValue ? Number(targetValue) : null,
+        unit: baseData.unit || null
       });
       await refreshHabits();
       navigate('/');
@@ -44,42 +44,26 @@ export default function AddSchedule() {
 
       <div className="card" style={{ background: 'var(--accent-light)', marginBottom: 24 }}>
         <h4 style={{ margin: 0, color: 'var(--accent)' }}>{baseData.title || 'New Habit'}</h4>
-        <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '4px 0 0' }}>{baseData.type} • {baseData.category}</p>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '4px 0 0' }}>{baseData.type} • {baseData.category}{baseData.unit ? ` • ${baseData.unit}` : ''}</p>
       </div>
 
       {baseData.type !== 'binary' && (
         <>
           <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 12, letterSpacing: 1 }}>
-            Target {baseData.type === 'duration' ? '(minutes)' : '(value)'}
+            Target {baseData.unit ? `(${baseData.unit})` : '(value)'}
           </h4>
           <input
             type="number"
             className="input-field"
-            placeholder={baseData.type === 'duration' ? 'e.g. 30' : 'e.g. 8'}
+            placeholder={baseData.unit ? `e.g. 30 ${baseData.unit}` : 'e.g. 8'}
             value={targetValue}
             onChange={(e) => setTargetValue(e.target.value)}
             min="0"
           />
-          {baseData.type === 'duration' && targetValue && (
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-              = {Math.floor(Number(targetValue) / 60)}h {Number(targetValue) % 60}m
-            </p>
-          )}
         </>
       )}
 
-      <div className="flex-between" style={{ marginTop: 24, marginBottom: 32 }}>
-        <div>
-          <h4 style={{ margin: 0 }}>Allow skip</h4>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Mark as skipped instead of missed</p>
-        </div>
-        <input
-          type="checkbox"
-          checked={allowSkip}
-          onChange={(e) => setAllowSkip(e.target.checked)}
-          style={{ width: 24, height: 24, accentColor: 'var(--accent)' }}
-        />
-      </div>
+
 
       <div style={{ marginTop: 'auto', paddingTop: 40, textAlign: 'center' }}>
         <p style={{ fontSize: 12, marginBottom: 16, color: 'var(--text-muted)' }}>Step 2 of 2</p>

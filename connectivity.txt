@@ -1,0 +1,1079 @@
+================================================================================
+                  HABIT TRACKER — FULL CONNECTIVITY MAP
+================================================================================
+
+This document explains how EVERY part of this app connects. It's organized in
+large chunks, each covering one complete "slice" of the system. Read top to
+bottom for the full picture.
+
+
+================================================================================
+  CHUNK 1 — THE BIG PICTURE (Architecture)
+================================================================================
+
+The app has 3 layers:
+
+    ┌──────────────────────────────────────────────────────────────┐
+    │                     FRONTEND (React + Vite)                  │
+    │   Deployed on Render as a static site                        │
+    │   client/dist/ is the built output                           │
+    │                                                              │
+    │   Talks to backend via:  VITE_API_URL env variable           │
+    │   All API calls go through:  client/src/api.js               │
+    └──────────────────────┬───────────────────────────────────────┘
+                           │  HTTP requests (fetch)
+                           │  Authorization: Bearer <access_token>
+                           ▼
+    ┌──────────────────────────────────────────────────────────────┐
+    │                     BACKEND (Express.js)                     │
+    │   Deployed on Render as a web service                        │
+    │   Single file:  server/index.js                              │
+    │                                                              │
+    │   Talks to Supabase via:  @supabase/supabase-js client       │
+    │   Using:  SUPABASE_URL + SUPABASE_KEY env variables          │
+    └──────────────────────┬───────────────────────────────────────┘
+                           │  Supabase JS SDK calls
+                           ▼
+    ┌──────────────────────────────────────────────────────────────┐
+    │                     DATABASE (Supabase/Postgres)              │
+    │   Hosted on Supabase (cloud)                                 │
+    │                                                              │
+    │   Tables: profiles, habits, habit_schedule, habit_logs,      │
+    │           streaks                                             │
+    │   Auth:   Supabase Auth (auth.users)                         │
+    │   RLS:    Row Level Security on all tables                   │
+    └──────────────────────────────────────────────────────────────┘
+
+KEY POINT: The backend acts as a PROXY. The frontend never talks to Supabase
+directly. Every request goes:  Frontend → Backend → Supabase → Backend → Frontend
+
+
+================================================================================
+  CHUNK 2 — FILE MAP (Every file and what it does)
+================================================================================
+
+SERVER (server/)
+────────────────
+  server/index.js          ← THE ONLY server file. Contains ALL routes:
+                              - Auth routes (/auth/*)
+                              - Habit CRUD (/habits/*)
+                              - Log CRUD (/logs/*)
+                              - Stats (/stats)
+                              - Profile (/profile)
+                              Also contains: verifyUser middleware, date helpers
+
+  server/.env              ← SUPABASE_URL, SUPABASE_KEY
+  server/package.json      ← Dependencies: express, cors, @supabase/supabase-js, dotenv
+
+
+CLIENT (client/src/)
+────────────────────
+  main.jsx                 ← Entry point. Renders <App /> into #root
+  App.jsx                  ← Router setup. Wraps everything in AuthProvider → HabitProvider
+  api.js                   ← ALL API calls to backend. Every function here = one HTTP request
+  lib/utils.js             ← getLocalDate() helper (YYYY-MM-DD in local timezone)
+
+  context/AuthContext.jsx  ← Auth state: user, loginUser, signupUser, logoutUser
+  context/HabitContext.jsx ← App data state: habits, todayLogs, stats, profile
+                              Also: midnight reset, window focus refresh
+
+  pages/Login.jsx          ← Login form
+  pages/Signup.jsx         ← Signup form
+  pages/Home.jsx           ← Main dashboard. Shows all habits + today's status
+  pages/Add.jsx            ← Step 1 of habit creation (title, type, category, unit)
+  pages/AddSchedule.jsx    ← Step 2 of habit creation (target value, save)
+  pages/HabitDetails.jsx   ← Single habit view: stats, today status, full history
+  pages/LogHabit.jsx       ← Log form: status (done/missed), value, note
+  pages/Stats.jsx          ← Overall stats dashboard: streaks, completion, per-habit
+  pages/Profile.jsx        ← Profile view: name, email, streak, logout
+  pages/EditProfile.jsx    ← Edit name (email is read-only)
+
+  components/BottomNav.jsx ← Bottom navigation bar (Home, Stats, Add, Profile)
+
+  client/.env              ← VITE_API_URL (points to backend URL)
+
+
+================================================================================
+  CHUNK 3 — AUTHENTICATION FLOW
+================================================================================
+
+HOW SIGNUP WORKS (complete flow):
+
+  1. User fills form in Signup.jsx
+  2. Signup.jsx calls AuthContext.signupUser(email, password, name)
+  3. AuthContext calls api.signup(email, password, name)
+  4. api.js sends POST /auth/signup to backend
+     Body: { email, password, name }
+  5. Backend (index.js L64-82) calls supabase.auth.signUp()
+     This passes name in options.data so Supabase stores it as user metadata
+  6. Supabase creates user in auth.users table
+  7. DB TRIGGER fires: on_auth_user_created → handle_new_user()
+     This auto-creates a row in the profiles table:
+       - id = new user's UUID
+       - name = from user metadata (or email prefix as fallback)
+       - avatar_url = from metadata
+  8. Backend returns { success: true, data: { user, session } }
+  9. api.js returns data to AuthContext
+  10. AuthContext stores session in localStorage('session')
+      and sets user state
+  11. App re-renders → ProtectedRoute now sees user → shows Home
+
+HOW LOGIN WORKS:
+
+  1. User fills form in Login.jsx
+  2. Login.jsx calls AuthContext.loginUser(email, password)
+  3. AuthContext calls api.login(email, password)
+  4. api.js sends POST /auth/login to backend
+  5. Backend calls supabase.auth.signInWithPassword()
+  6. Returns { user, session } with access_token
+  7. AuthContext stores session in localStorage, sets user state
+  8. App re-renders → user is redirected to Home
+
+HOW EVERY SUBSEQUENT REQUEST IS AUTHENTICATED:
+
+  1. api.js (fetchAPI function) reads localStorage('session')
+  2. Extracts session.access_token
+  3. Attaches header:  Authorization: Bearer <access_token>
+  4. Backend verifyUser middleware (index.js L31-50):
+     - Extracts token from header
+     - Calls supabase.auth.getUser(token) to validate
+     - If valid: attaches req.user = user, calls next()
+     - If invalid: returns 401
+
+HOW SESSION PERSISTENCE WORKS:
+
+  1. On app load, AuthContext.useEffect runs (L10-27)
+  2. Checks if localStorage('session') exists
+  3. If yes: calls api.getMe() → GET /auth/me
+  4. If token is still valid: sets user state (user stays logged in)
+  5. If token expired/invalid: clears localStorage, sets user = null → redirect to login
+
+HOW LOGOUT WORKS:
+
+  1. Profile.jsx → logoutUser()
+  2. AuthContext calls api.logout() → POST /auth/logout
+  3. Backend calls supabase.auth.signOut()
+  4. AuthContext clears localStorage('session'), sets user = null
+  5. ProtectedRoute sees user=null → redirects to /login
+
+
+ROUTE PROTECTION:
+
+  App.jsx defines two wrapper components:
+
+  ProtectedRoute: if no user → redirect to /login
+  AuthRoute: if user exists → redirect to / (prevents logged-in users from seeing login/signup)
+
+  All main pages are wrapped in ProtectedRoute
+  Login and Signup are wrapped in AuthRoute
+
+
+================================================================================
+  CHUNK 4 — STATE MANAGEMENT (THE BRAIN)
+================================================================================
+
+There are TWO React Contexts that hold ALL app state:
+
+
+─── AuthContext (context/AuthContext.jsx) ───
+
+  STATE:
+    user        → current authenticated user object (from Supabase)
+    loading     → true while checking session on startup
+
+  FUNCTIONS:
+    loginUser(email, password)
+    signupUser(email, password, name)
+    logoutUser()
+
+  Used by: App.jsx (route protection), HabitContext (to know if user exists)
+
+
+─── HabitContext (context/HabitContext.jsx) ───
+
+  This is the MAIN data store. Every page reads from here.
+
+  STATE:
+    habits      → array of all user's habits (from GET /habits)
+    todayLogs   → array of today's logs for all habits (from GET /logs/today)
+    profile     → user's profile data (from GET /profile)
+    stats       → aggregated stats (from GET /stats)
+    loading     → true while fetching
+    error       → error message if fetch fails
+
+  FUNCTIONS:
+    isHabitDoneToday(habitId) → checks if todayLogs has a 'done' entry for this habit
+    refreshHabits()           → re-fetches habits, todayLogs, and stats
+    refreshProfile()          → re-fetches profile only
+
+  DATA FETCH FLOW:
+    1. On mount (or when user changes): fetchAllData() fires
+    2. It calls FOUR endpoints in parallel:
+         GET /habits       → setHabits()
+         GET /logs/today   → setTodayLogs()
+         GET /profile      → setProfile()
+         GET /stats         → setStats()
+    3. Every page reads from these state variables
+
+  WHO USES WHAT:
+    Home.jsx         → habits, todayLogs, profile, isHabitDoneToday, refreshHabits
+    Stats.jsx        → stats, habits
+    Profile.jsx      → profile, stats, habits
+    HabitDetails.jsx → habits (finds habit by ID)
+    LogHabit.jsx     → habits, refreshHabits
+    Add.jsx          → (creates habit, nothing read)
+    AddSchedule.jsx  → refreshHabits (after saving)
+    EditProfile.jsx  → profile, refreshProfile
+
+
+THE CONTEXT PROVIDER TREE (App.jsx):
+
+  <Router>
+    <AuthProvider>           ← provides user, loginUser, etc.
+      <HabitProvider>        ← provides habits, stats, etc. (needs user from AuthProvider)
+        <AppContent>         ← renders routes + BottomNav
+      </HabitProvider>
+    </AuthProvider>
+  </Router>
+
+
+================================================================================
+  CHUNK 5 — DAILY RESET & FRESHNESS MECHANISM
+================================================================================
+
+PROBLEM IT SOLVES:
+  If user marks habits "done" on Monday and keeps the tab open, on Tuesday
+  the frontend would STILL show Monday's data (habits look done but they're
+  from yesterday).
+
+HOW IT WORKS (HabitContext.jsx):
+
+  Two mechanisms ensure data freshness:
+
+  1. MIDNIGHT INTERVAL (30-second poll):
+     - On mount, stores current date: lastDate = getLocalDate()
+     - Every 30 seconds, checks: has the date changed?
+     - If yes (midnight crossed): calls fetchAllData()
+     - fetchAllData() calls GET /logs/today on the server
+     - Server uses getLocalDate() which returns the NEW date
+     - So todayLogs comes back EMPTY (no logs for the new day yet)
+     - Frontend now shows all habits as "Pending"
+
+  2. WINDOW FOCUS LISTENER:
+     - When user switches back to this tab: fires fetchAllData()
+     - This catches the case where user left tab for hours
+     - Always re-fetches, regardless of whether date changed
+
+  WHY BOTH?
+     - Interval catches midnight even if user is actively on the tab
+     - Focus listener catches stale data when user comes back after hours
+
+  DATE COMPARISON:
+     - getLocalDate() returns YYYY-MM-DD in LOCAL time (IST)
+     - Both frontend and backend use the same function
+     - This means "midnight" = midnight IST, not UTC
+     - Critical: without this, 11:30 PM IST = next day in UTC
+
+
+HOW "PENDING" STATE WORKS:
+
+  There is NO "pending" status in the database. It's implicit:
+    - If habit_logs has NO row for (habit_id, today) → habit is "pending"
+    - If row exists with status='done' → habit is "done"
+    - If row exists with status='missed' → habit is "missed"
+
+  The frontend checks this via:
+    isHabitDoneToday(habitId) → searches todayLogs array
+    If no matching log found → returns false → UI shows "Pending"
+
+
+================================================================================
+  CHUNK 6 — CREATING A HABIT (Complete Flow)
+================================================================================
+
+This is a 2-step wizard: Add.jsx → AddSchedule.jsx
+
+STEP 1 — Add.jsx (/add):
+
+  User enters:
+    - title (required, text input)
+    - description (optional, text input)
+    - type: "binary" or "measurable" (chip selector)
+    - unit: text input, ONLY shown when type = "measurable"
+             (e.g. "kg", "minutes", "km", "glasses")
+    - category: "health" | "fitness" | "learning" | "mindfulness" (chip selector)
+
+  On "Continue":
+    Navigates to /add/schedule using React Router state:
+      navigate('/add/schedule', {
+        state: { habitData: { title, description, type, category, unit } }
+      })
+
+    IMPORTANT: No API call is made here. Data is passed via router state.
+
+STEP 2 — AddSchedule.jsx (/add/schedule):
+
+  Reads habitData from location.state
+  Shows:
+    - Habit summary card (title, type, category, unit)
+    - If type is NOT binary: shows target value input
+      (e.g. "Target (kg)" with placeholder "e.g. 30 kg")
+
+  On "Save habit":
+    1. Calls api.createHabit({
+         title, description, type, category,
+         target_value: number or null,
+         unit: string or null
+       })
+    2. api.js sends POST /habits to backend
+    3. Backend (index.js L148-187):
+       - Validates: title required, type required
+       - Validates type: must be "binary" or "measurable"
+         (BLOCKS "duration" — old type no longer allowed for new habits)
+       - Validates category: must be one of the 4 valid categories
+       - Inserts into habits table:
+           user_id, title, description, type, category,
+           target_value, unit, allow_skip=false
+       - Returns the created habit
+    4. AddSchedule calls refreshHabits() → re-fetches all data
+    5. Navigates to Home
+
+WHAT GETS STORED IN DB (habits table):
+
+  Column          │ Value
+  ────────────────┼──────────────────────────────
+  id              │ auto-generated UUID
+  user_id         │ from req.user.id (authenticated user)
+  title           │ from request body
+  description     │ from request body (or null)
+  type            │ "binary" or "measurable"
+  category        │ one of 4 categories
+  target_value    │ number (for measurable) or null
+  unit            │ string like "kg" or null (for binary)
+  allow_skip      │ always false (skip feature removed)
+  is_active       │ defaults to true
+  reminder_time   │ null (not implemented)
+  reminder_enabled│ false (not implemented)
+  created_at      │ auto-generated timestamp
+
+
+BACKWARD COMPATIBILITY (old "duration" type):
+
+  Old habits with type="duration" still exist in the database.
+  - GET /habits returns them normally
+  - They show up in Home, Stats, HabitDetails
+  - They are treated IDENTICALLY to "measurable" in the UI
+  - The LogHabit page uses habit.unit to show the label
+    For old duration habits that have unit=null, it falls back to no label
+  - The backend does NOT block reading/updating duration habits
+    Only POST /habits (creation) blocks "duration"
+
+
+================================================================================
+  CHUNK 7 — LOGGING A HABIT (Complete Flow)
+================================================================================
+
+There are TWO ways to log a habit:
+
+
+─── WAY 1: Quick toggle on Home page (binary habits only) ───
+
+  1. User taps the circle icon next to a binary habit
+  2. Home.jsx handleToggle() fires:
+     - Checks: is this habit already done today? (isHabitDoneToday)
+     - If NOT done:
+         Calls api.createLog({ habitId, status: 'done', date: getLocalDate() })
+     - If already DONE (undo):
+         Calls api.deleteLog(habitId, todayStr)
+  3. For non-binary habits: clicking the circle REDIRECTS to /habit/:id/log
+     (because those habits need a numeric value)
+
+
+─── WAY 2: Full log form at /habit/:id/log (LogHabit.jsx) ───
+
+  This is used for:
+    - Non-binary habits (measurable, legacy duration)
+    - When user wants to add a note
+    - When user wants to explicitly mark "missed"
+
+  The form shows:
+
+  1. Habit info card (title, description/category)
+
+  2. Status selector: ["done", "missed"] chips
+     (Previously had "skipped" — now REMOVED)
+
+  3. Value input (only for non-binary + status=done):
+     Label: "Value (kg)" ← uses habit.unit
+     Placeholder: "e.g. 30 kg" ← uses habit.unit
+     If habit has no unit: shows "Value" and "Enter number"
+
+  4. Note textarea (always visible)
+
+  5. On "Save log":
+     Builds payload:
+       { habitId, status, date: getLocalDate(), note }
+       If non-binary + done: adds value (as Number)
+
+     Calls api.createLog(payload) → POST /logs
+
+  Backend (index.js L229-279):
+    1. Validates: habitId required, status required
+    2. Validates status: must be "done" or "missed"
+       (Previously allowed "skipped" — now BLOCKED)
+    3. Verifies habit ownership (habit belongs to this user)
+    4. Determines date: uses provided date, or getLocalDate()
+    5. Sanitizes value: converts to Number, NaN → null
+    6. UPSERTS into habit_logs:
+       Uses onConflict: "habit_id, date"
+       This means: if a log already exists for this habit+date, it UPDATES it
+       If no log exists, it INSERTS a new one
+    7. Returns the log entry
+
+  After save:
+    - refreshHabits() is called → re-fetches habits, todayLogs, stats
+    - Navigates back to Home
+
+WHAT GETS STORED IN DB (habit_logs table):
+
+  Column      │ Value
+  ────────────┼──────────────────────────────
+  id          │ auto-generated UUID
+  habit_id    │ the habit's UUID
+  date        │ YYYY-MM-DD (local date)
+  status      │ "done" or "missed" (or legacy "skipped")
+  value       │ numeric (e.g. 30) or null
+  note        │ text or null
+  created_at  │ auto-generated timestamp
+
+  UNIQUE constraint: (habit_id, date) → one log per habit per day
+
+
+UNDO/DELETE LOG:
+
+  Backend: DELETE /logs/:habitId/:date (index.js L282-309)
+    1. Verifies habit ownership
+    2. Deletes the log row for that habit+date
+    3. Used by Home.jsx when user un-checks a done habit
+
+  This means: user can toggle done/pending freely on the same day.
+
+
+================================================================================
+  CHUNK 8 — THE HOME PAGE (Dashboard)
+================================================================================
+
+File: Home.jsx — Route: /
+
+WHAT IT SHOWS:
+
+  ┌─────────────────────────────────────────┐
+  │  Date                         [Avatar]  │
+  │  Good morning, {name}                   │
+  │                                         │
+  │  ┌───────────────────────────────────┐  │
+  │  │  [67%]  3 done / 5 resolved      │  │
+  │  │         2 habits pending          │  │
+  │  └───────────────────────────────────┘  │
+  │                                         │
+  │  Today                                  │
+  │  ┌───────────────────────────────────┐  │
+  │  │ ✓ Morning run       Done         │  │
+  │  │ ○ Read 30 pages     Pending      │  │
+  │  │ ○ Drink water       Pending      │  │
+  │  └───────────────────────────────────┘  │
+  └─────────────────────────────────────────┘
+
+DATA SOURCES:
+
+  habits       ← from HabitContext (GET /habits)
+  todayLogs    ← from HabitContext (GET /logs/today)
+  profile      ← from HabitContext (GET /profile)
+
+PERCENTAGE CALCULATION:
+
+  doneCount    = number of habits where todayLogs has a 'done' entry
+  loggedHabitIds = Set of unique habit_ids in todayLogs
+  loggedCount  = loggedHabitIds.size (habits with ANY log today: done OR missed)
+
+  percentage = loggedCount > 0 ? round(doneCount / loggedCount * 100) : 0
+
+  IMPORTANT: Pending habits (no log) are EXCLUDED from percentage.
+  Only "resolved" habits (done or missed) count.
+
+  Example:
+    5 habits total
+    3 marked done, 2 marked missed, 0 pending
+    → 3/5 = 60%
+
+    5 habits total
+    3 marked done, 0 marked missed, 2 pending
+    → 3/3 = 100% (pending excluded from denominator)
+
+HABIT LIST:
+
+  Each habit shows:
+    - Circle icon (filled green if done, empty grey if pending)
+    - Title (line-through if done)
+    - Description or category
+    - Status badge: "Done" (green) or "Pending" (orange)
+
+  Clicking the circle:
+    Binary + not done → api.createLog({status:'done'}) → refreshHabits()
+    Binary + done → api.deleteLog() (undo) → refreshHabits()
+    Non-binary + not done → navigate to /habit/:id/log
+    Non-binary + done → api.deleteLog() (undo) → refreshHabits()
+
+  Clicking the card body → navigate to /habit/:id (HabitDetails)
+
+
+================================================================================
+  CHUNK 9 — HABIT DETAILS PAGE
+================================================================================
+
+File: HabitDetails.jsx — Route: /habit/:id
+
+DATA FLOW:
+
+  1. Reads habit from HabitContext.habits (finds by ID from URL param)
+  2. Calls api.getLogs(habit.id) → GET /logs/:habitId
+  3. Backend returns: { logs: [...], stats: { current_streak, longest_streak, ... } }
+
+WHAT IT SHOWS:
+
+  ┌─────────────────────────────────────────┐
+  │ ← {Habit Title}                         │
+  │                                         │
+  │ ┌───────────────────────────────────┐   │
+  │ │  health • measurable              │   │
+  │ │  {description}                    │   │
+  │ └───────────────────────────────────┘   │
+  │                                         │
+  │  [3]          [7]          [75%]        │
+  │  Current      Best         Completion   │
+  │  streak       streak                    │
+  │                                         │
+  │  Today: Done — 30                       │
+  │  [Log today] / [Update today's log]     │
+  │                                         │
+  │  HISTORY (12 logs)                      │
+  │  ┌─────────────────────────────────┐   │
+  │  │ Tue, 1 Apr 2026    done         │   │
+  │  │                    Value: 30 kg │   │
+  │  │ Mon, 31 Mar 2026   missed       │   │
+  │  │ Sun, 30 Mar 2026   skipped      │   │  ← old skipped logs still show
+  │  └─────────────────────────────────┘   │
+  └─────────────────────────────────────────┘
+
+STREAK CALCULATION (server-side, index.js L364-412):
+
+  1. Filters logs where status = "done" → doneLogs
+  2. Iterates through doneLogs chronologically:
+     - If consecutive days: tempStreak++
+     - If gap: checks if gap days have non-missed logs
+       (gaps with no log or with 'missed' break the streak)
+  3. current_streak: only valid if last done date is today or yesterday
+  4. longest_streak: max tempStreak seen
+
+COMPLETION RATE (server-side):
+  = round(doneCount / totalLogs * 100)
+  Where totalLogs = ALL log entries (done + missed + legacy skipped)
+  This is a HISTORICAL rate, not today-only.
+
+HISTORY LIST:
+  - Sorted descending (newest first)
+  - Each entry shows: date, status badge, note (if any), value + unit (if any)
+  - Status colors: done=green, skipped=amber (legacy), missed=red
+  - Value shows unit: "Value: 30 kg" (uses habit.unit)
+
+"LOG TODAY" BUTTON:
+  Navigates to /habit/:id/log (LogHabit.jsx)
+  If today already has a log: button says "Update today's log"
+
+
+================================================================================
+  CHUNK 10 — STATS PAGE
+================================================================================
+
+File: Stats.jsx — Route: /stats
+
+DATA FLOW:
+
+  Reads from HabitContext.stats (fetched from GET /stats on load)
+
+BACKEND (index.js L436-524):
+
+  GET /stats does:
+    1. Fetches all habits for this user
+    2. Fetches ALL logs for those habits (all time, not just today)
+    3. Calculates overall stats:
+       - activeHabits: count of habits
+       - totalLogs: count of all log entries
+       - completionRate: round(doneCount / totalLogs * 100)
+       - currentStreak: based on unique dates with at least one "done" log
+       - longestStreak: max consecutive days with "done" logs
+    4. Calculates per-habit stats:
+       For each habit:
+         - totalLogs, doneCount, completionRate
+    5. Returns everything in one response
+
+WHAT IT SHOWS:
+
+  ┌─────────────────────────────────────────┐
+  │  Your progress                          │
+  │                                         │
+  │  ┌────────┐  ┌────────┐                │
+  │  │   5    │  │   12   │                │
+  │  │Current │  │Longest │                │
+  │  │streak  │  │streak  │                │
+  │  ├────────┤  ├────────┤                │
+  │  │  72%   │  │   4    │                │
+  │  │Overall │  │Active  │                │
+  │  │complet.│  │habits  │                │
+  │  └────────┘  └────────┘                │
+  │                                         │
+  │  PER HABIT                              │
+  │  ┌───────────────────────────────────┐  │
+  │  │ Morning run          85%    >    │  │
+  │  │ health • 17/20 logged            │  │
+  │  │ [████████████░░░]                │  │
+  │  ├───────────────────────────────────┤  │
+  │  │ Read books           60%    >    │  │
+  │  │ learning • 9/15 logged           │  │
+  │  │ [█████████░░░░░░]                │  │
+  │  └───────────────────────────────────┘  │
+  └─────────────────────────────────────────┘
+
+  Clicking a habit card → navigates to /habit/:id (HabitDetails)
+
+  Progress bar color:
+    ≥70% → green (success)
+    ≥40% → orange (warning)
+    <40% → grey (muted)
+
+
+================================================================================
+  CHUNK 11 — PROFILE & EDIT PROFILE
+================================================================================
+
+─── Profile.jsx (/profile) ───
+
+  DATA: profile, stats, habits from HabitContext
+
+  Shows:
+    - Avatar (initial letter in colored circle)
+    - Name, email
+    - Member since date
+    - Quick stats: current streak, habit count, completion rate
+    - "Edit profile" link → /profile/edit
+    - "Sign out" button → logoutUser()
+
+  Backend source: GET /profile (index.js L530-552)
+    1. Fetches from profiles table where id = user's UUID
+    2. Enriches with:
+       - email: from Supabase auth user
+       - initials: first letter of name (uppercase)
+       - memberSince: formatted date
+
+─── EditProfile.jsx (/profile/edit) ───
+
+  Shows:
+    - Avatar (read-only)
+    - Name (editable text input)
+    - Email (read-only, disabled)
+    - Member since (read-only, disabled)
+
+  On "Save changes":
+    1. Calls api.updateProfile({ name })
+    2. api.js sends PUT /profile to backend
+    3. Backend updates profiles table
+    4. Calls refreshProfile() → re-fetches profile
+    5. Navigates back to /profile
+
+  NOTE: Only name is editable. Email is from Supabase Auth and cannot be
+  changed from this form. Avatar is initials-only (no upload feature).
+
+
+================================================================================
+  CHUNK 12 — BOTTOM NAVIGATION
+================================================================================
+
+File: BottomNav.jsx — Component, not a page
+
+SHOWN WHEN:
+  - User is logged in (App.jsx: {user && <BottomNav />})
+  - Current route is NOT a "nested" page
+
+HIDDEN ON:
+  - /habit/:id/log (ends with /log)
+  - /add/schedule (ends with /schedule)
+  - /profile/edit (ends with /edit)
+
+  Detection: checks if current path ends with any of ['/log', '/schedule', '/edit']
+
+TABS:
+  Home     → /
+  Stats    → /stats
+  Add      → /add
+  Profile  → /profile
+
+  Active tab is highlighted based on current pathname match.
+
+
+================================================================================
+  CHUNK 13 — API CLIENT (How Frontend Talks to Backend)
+================================================================================
+
+File: api.js
+
+PATTERN: Every function calls fetchAPI(endpoint, options)
+
+fetchAPI does:
+  1. Gets session from localStorage('session')
+  2. Parses JSON → extracts access_token
+  3. Sets headers:
+       Content-Type: application/json
+       Authorization: Bearer <access_token>
+  4. Calls fetch(VITE_API_URL + endpoint, options)
+  5. Parses response JSON
+  6. If json.success is false → throws Error(json.error)
+  7. Returns json.data
+
+ALL AVAILABLE API FUNCTIONS:
+
+  ┌────────────────────────────────────────────────────────────────┐
+  │ Function          │ Method │ Endpoint          │ Body          │
+  ├───────────────────┼────────┼───────────────────┼───────────────┤
+  │ signup()          │ POST   │ /auth/signup       │ email,pw,name │
+  │ login()           │ POST   │ /auth/login        │ email,pw      │
+  │ logout()          │ POST   │ /auth/logout       │ (none)        │
+  │ getMe()           │ GET    │ /auth/me           │ (none)        │
+  │ getHabits()       │ GET    │ /habits            │ (none)        │
+  │ getHabit(id)      │ GET    │ /habits/:id        │ (none)        │
+  │ createHabit(data) │ POST   │ /habits            │ habit data    │
+  │ updateHabit(id,d) │ PUT    │ /habits/:id        │ updates       │
+  │ deleteHabit(id)   │ DELETE │ /habits/:id        │ (none)        │
+  │ createLog(data)   │ POST   │ /logs              │ log data      │
+  │ deleteLog(hId,dt) │ DELETE │ /logs/:hId/:date   │ (none)        │
+  │ getTodayLogs()    │ GET    │ /logs/today        │ (none)        │
+  │ getLogs(habitId)  │ GET    │ /logs/:habitId     │ (none)        │
+  │ getStats()        │ GET    │ /stats             │ (none)        │
+  │ getProfile()      │ GET    │ /profile           │ (none)        │
+  │ updateProfile(d)  │ PUT    │ /profile           │ updates       │
+  └────────────────────────────────────────────────────────────────┘
+
+IMPORTANT: Every function except signup/login requires a valid session token.
+If token is missing/invalid, verifyUser middleware returns 401, and fetchAPI
+throws an error which the calling component catches.
+
+
+================================================================================
+  CHUNK 14 — DATABASE TABLES & RELATIONSHIPS
+================================================================================
+
+  auth.users (Supabase managed)
+    │
+    │ 1:1 (trigger creates profile on signup)
+    ▼
+  profiles
+    id (PK, FK → auth.users.id)
+    name, avatar_url, timezone, created_at
+    │
+    │ 1:many
+    ▼
+  habits
+    id (PK, UUID)
+    user_id (FK → profiles.id, CASCADE DELETE)
+    title, description, category, type
+    target_value, unit
+    allow_skip (always false now)
+    is_active, reminder_time, reminder_enabled
+    created_at
+    │
+    ├── 1:many → habit_schedule
+    │     id, habit_id (FK), day_of_week (0-6)
+    │     UNIQUE(habit_id, day_of_week)
+    │     NOTE: Currently NOT used by the app. Table exists but
+    │           no routes read/write to it.
+    │
+    ├── 1:many → habit_logs
+    │     id, habit_id (FK), date, status, value, note, created_at
+    │     UNIQUE(habit_id, date) ← one log per habit per day
+    │     status: 'done' | 'missed' | 'skipped' (legacy in DB)
+    │
+    └── 1:1 → streaks
+          id, habit_id (FK, UNIQUE), current_streak, longest_streak
+          last_completed_date
+          NOTE: Currently NOT used by the app. Streaks are calculated
+                dynamically from habit_logs data. This table exists
+                but is not read/written to.
+
+ROW LEVEL SECURITY (RLS):
+
+  Every table has RLS enabled. Policies ensure:
+    - profiles: user can only see/edit their own profile
+    - habits: user can only see/edit habits where user_id = their UUID
+    - habit_schedule: user can only see schedule for their own habits
+    - habit_logs: user can only see logs for their own habits
+    - streaks: user can only see streaks for their own habits
+
+  The backend uses the Supabase service key (SUPABASE_KEY), which may
+  bypass RLS depending on whether it's the anon key or service_role key.
+  The verifyUser middleware separately enforces user ownership by
+  filtering queries with .eq("user_id", req.user.id).
+
+
+================================================================================
+  CHUNK 15 — DATE & TIMEZONE HANDLING
+================================================================================
+
+CRITICAL DESIGN DECISION: This app is IST-only.
+
+Both frontend and backend have a getLocalDate() function that returns
+the date in the SERVER/BROWSER's local timezone.
+
+  Frontend (lib/utils.js):
+    new Date() → extract year, month, day → format YYYY-MM-DD
+
+  Backend (index.js):
+    Exact same logic
+
+WHY THIS MATTERS:
+  - Render servers may run in UTC
+  - IST = UTC+5:30
+  - At 11 PM IST, UTC date is already the next day
+  - If we used UTC dates, a user logging at 11 PM IST would have
+    their log recorded for "tomorrow"
+  - getLocalDate() prevents this by using local time
+
+DEPLOYMENT CONSIDERATION:
+  - The Render server should have TZ=Asia/Kolkata set as environment variable
+  - This ensures server's new Date() returns IST
+  - Without this, the server would use UTC and dates would mismatch
+
+WHERE DATES ARE USED:
+  1. createLog: stores date in habit_logs
+  2. getTodayLogs: filters logs where date = today
+  3. deleteLog: deletes log for specific date
+  4. Streak calculation: compares consecutive dates
+  5. Home page: isHabitDoneToday checks todayLogs
+  6. Midnight detection: compares getLocalDate() to cached date
+
+
+================================================================================
+  CHUNK 16 — HABIT TYPES (Current System)
+================================================================================
+
+CURRENT TYPES (for new habits):
+
+  1. BINARY
+     - Yes/No completion
+     - No value to track
+     - One-tap toggle on Home page
+     - Examples: "Meditate", "Take vitamins"
+
+  2. MEASURABLE
+     - Tracks a numeric value with user-defined unit
+     - Cannot one-tap from Home (redirects to LogHabit form)
+     - unit is stored in habits.unit (e.g. "kg", "minutes", "km")
+     - target_value is optional (e.g. target: 8 glasses)
+     - Examples: "Drink water" (glasses), "Run" (km), "Study" (minutes)
+
+LEGACY TYPE (still in DB, still works):
+
+  3. DURATION (no longer creatable)
+     - Functionally identical to measurable
+     - Was hardcoded to "minutes" as unit
+     - Old habits with type="duration" still show up everywhere
+     - The UI treats them same as measurable
+     - habit.unit is used; if null, no unit label shown
+     - Backend doesn't block reading/updating duration habits
+       Only blocks CREATING new ones
+
+
+================================================================================
+  CHUNK 17 — HABIT STATUS SYSTEM
+================================================================================
+
+CURRENT STATUSES (for new logs):
+
+  DONE    → habit was completed for the day
+  MISSED  → habit was explicitly not done
+
+  These are the only two options in LogHabit.jsx and the only
+  two accepted by POST /logs on the backend.
+
+LEGACY STATUS (still in DB):
+
+  SKIPPED → was previously allowed when allow_skip was true
+  Old logs with status="skipped" still exist and display correctly:
+    - HabitDetails history: shows with amber/yellow badge
+    - Stats/completion: counted as a log entry (not "done")
+    - Streaks: skipped logs in gaps DON'T break streaks
+      (only "missed" breaks streaks, see L391)
+
+IMPLICIT STATUS:
+
+  PENDING → no log exists for this habit on today's date
+  This is NOT stored in the database. It's the absence of a log.
+  Frontend detects it: if isHabitDoneToday returns false AND
+  todayLogs has no entry for this habit → it's pending.
+
+
+================================================================================
+  CHUNK 18 — BACKEND ROUTE MAP (Complete)
+================================================================================
+
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ Method │ Route              │ Auth?  │ What it does                  │
+  ├────────┼────────────────────┼────────┼───────────────────────────────┤
+  │ GET    │ /ping              │ No     │ Health check                  │
+  │        │                    │        │                               │
+  │ POST   │ /auth/signup       │ No     │ Create user                   │
+  │ POST   │ /auth/login        │ No     │ Login, get token              │
+  │ POST   │ /auth/logout       │ Yes    │ Invalidate session            │
+  │ GET    │ /auth/me           │ Yes    │ Return current user           │
+  │        │                    │        │                               │
+  │ GET    │ /habits            │ Yes    │ All user's habits             │
+  │ GET    │ /habits/:id        │ Yes    │ Single habit                  │
+  │ POST   │ /habits            │ Yes    │ Create habit                  │
+  │ PUT    │ /habits/:id        │ Yes    │ Update habit                  │
+  │ DELETE │ /habits/:id        │ Yes    │ Delete habit (cascades logs)  │
+  │        │                    │        │                               │
+  │ POST   │ /logs              │ Yes    │ Create/update log (upsert)    │
+  │ DELETE │ /logs/:hId/:date   │ Yes    │ Delete specific log           │
+  │ GET    │ /logs/today        │ Yes    │ Today's logs for all habits   │
+  │ GET    │ /logs/:habitId     │ Yes    │ All logs + stats for habit    │
+  │        │                    │        │                               │
+  │ GET    │ /stats             │ Yes    │ Aggregated stats + per-habit  │
+  │        │                    │        │                               │
+  │ GET    │ /profile           │ Yes    │ User profile + enriched data  │
+  │ PUT    │ /profile           │ Yes    │ Update name/avatar/timezone   │
+  └──────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  CHUNK 19 — FRONTEND ROUTE MAP (Complete)
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Path              │ Component     │ Protected? │ BottomNav? │ Purpose   │
+  ├───────────────────┼───────────────┼────────────┼────────────┼───────────┤
+  │ /login            │ Login         │ AuthRoute  │ No         │ Login     │
+  │ /signup           │ Signup        │ AuthRoute  │ No         │ Register  │
+  │ /                 │ Home          │ Yes        │ Yes        │ Dashboard │
+  │ /stats            │ Stats         │ Yes        │ Yes        │ Stats     │
+  │ /add              │ Add           │ Yes        │ Yes        │ Step 1    │
+  │ /add/schedule     │ AddSchedule   │ Yes        │ No*        │ Step 2    │
+  │ /profile          │ Profile       │ Yes        │ Yes        │ Profile   │
+  │ /profile/edit     │ EditProfile   │ Yes        │ No*        │ Edit name │
+  │ /habit/:id        │ HabitDetails  │ Yes        │ Yes        │ Details   │
+  │ /habit/:id/log    │ LogHabit      │ Yes        │ No*        │ Log form  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  * BottomNav hides itself on routes ending with /schedule, /edit, /log
+
+
+================================================================================
+  CHUNK 20 — COMPLETE USER JOURNEY (Start to Finish)
+================================================================================
+
+Day 1:
+  1. User visits app → sees Login page
+  2. Clicks "Sign up" → fills name, email, password
+  3. Account created → auto-logged in → Home page (empty)
+  4. Taps "+" in bottom nav → Add page
+  5. Types "Drink water", selects "measurable", types "glasses" as unit
+  6. Taps Continue → AddSchedule page
+  7. Types target: 8
+  8. Taps "Save habit" → habit created → back to Home
+  9. Creates another: "Meditate" (binary)
+
+  Home now shows:
+    0 done / 0 resolved — 2 habits pending
+    ○ Drink water   Pending
+    ○ Meditate      Pending
+
+  10. Taps Meditate circle → toggles to DONE
+      API calls: POST /logs {status:'done', date:'2026-04-07'}
+      Home refreshes: 1 done / 1 resolved — 1 habit pending
+
+  11. Taps Drink water circle → redirected to LogHabit page
+      (because it's measurable, needs a value)
+  12. Status: done, Value: 6, Note: "busy day"
+  13. Taps "Save log" → back to Home
+      Home: 2 done / 2 resolved — 0 pending
+
+  14. Taps Stats → sees 100% completion,
+      1-day streak, 2 active habits
+
+Day 2 (midnight crosses):
+  15. Midnight detection fires → fetchAllData()
+  16. GET /logs/today returns [] (no logs for new date)
+  17. Home resets:
+      0 done / 0 resolved — 2 habits pending
+      ○ Drink water   Pending
+      ○ Meditate      Pending
+
+  18. User only does Meditate. Forgets Drink water.
+
+Day 3:
+  19. Midnight crosses → everything resets again
+  20. User taps Drink water card → HabitDetails page
+  21. Sees history:
+      Apr 8: (no log = implicitly missed, but NOT shown individually)
+      Apr 7: done — Value: 6 glasses
+  22. Streak: 0 (missed yesterday breaks it)
+
+  The "missed" status is dynamic: past dates with no log are
+  treated as missed in calculation, but no DB row is inserted.
+  Only explicitly logged days appear in the history list.
+
+
+================================================================================
+  CHUNK 21 — WHAT'S UNUSED / PARTIALLY IMPLEMENTED
+================================================================================
+
+  1. habit_schedule table
+     - Exists in DB, has routes/indexes
+     - NOT used by any frontend page
+     - No UI to set which days a habit is active
+     - All habits are assumed active every day
+
+  2. streaks table
+     - Exists in DB
+     - NOT read or written by the app
+     - Streaks are calculated dynamically from habit_logs
+     - The table is a relic/placeholder for potential optimization
+
+  3. Reminder fields (reminder_time, reminder_enabled)
+     - Columns exist in habits table
+     - Always null/false
+     - No UI to set them, no notification system
+
+  4. avatar_url in profiles
+     - Column exists, populated from Supabase auth metadata
+     - UI only uses initials (first letter of name), never the actual URL
+
+  5. timezone in profiles
+     - Column exists with default 'Asia/Kolkata'
+     - Editable via PUT /profile
+     - But NOT used anywhere — date logic uses server's local time
+     - App assumes IST everywhere
+
+  6. is_active in habits
+     - Column exists with default true
+     - Could be used to "pause" habits
+     - But no UI supports it and no queries filter by it
+     - All habits show up regardless
+
+  7. updateHabit / deleteHabit
+     - API functions exist in api.js
+     - Backend routes exist
+     - But NO frontend UI to edit or delete a habit
+     - Would need to add buttons in HabitDetails page
+
+
+================================================================================
+  END
+================================================================================

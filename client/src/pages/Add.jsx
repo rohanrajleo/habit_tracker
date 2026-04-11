@@ -6,8 +6,9 @@ export default function Add() {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [type, setType] = useState('binary'); // strictly map db schema 'binary'
+  const [type, setType] = useState('binary');
   const [category, setCategory] = useState('health');
+  const [unit, setUnit] = useState('');
 
   return (
     <div className="page-container">
@@ -34,17 +35,30 @@ export default function Add() {
 
       <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-muted)', margin: '24px 0 12px', letterSpacing: 1 }}>Type</h4>
       <div className="flex-row gap-2">
-        {['binary', 'measurable', 'duration'].map(t => (
+        {['binary', 'measurable'].map(t => (
           <div 
             key={t}
             className={`chip ${type === t ? 'active' : ''}`}
-            onClick={() => setType(t)}
+            onClick={() => { setType(t); if (t === 'binary') setUnit(''); }}
             style={{ textTransform: 'capitalize' }}
           >
             {t}
           </div>
         ))}
       </div>
+
+      {type === 'measurable' && (
+        <>
+          <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-muted)', margin: '24px 0 12px', letterSpacing: 1 }}>Unit</h4>
+          <input 
+            type="text" 
+            className="input-field" 
+            placeholder="e.g. kg, minutes, km, glasses" 
+            value={unit}
+            onChange={e => setUnit(e.target.value)}
+          />
+        </>
+      )}
 
       <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-muted)', margin: '24px 0 12px', letterSpacing: 1 }}>Category</h4>
       <div className="flex-row gap-2" style={{ flexWrap: 'wrap' }}>
@@ -64,7 +78,7 @@ export default function Add() {
         <p style={{ fontSize: 12, marginBottom: 16 }}>Step 1 of 2 • Schedule next</p>
         <button 
           className="btn-primary" 
-          onClick={() => navigate('/add/schedule', { state: { habitData: { title, description, type, category } } })}
+          onClick={() => navigate('/add/schedule', { state: { habitData: { title, description, type, category, unit: unit.trim() || null } } })}
           disabled={!title.trim()}
           style={{ opacity: !title.trim() ? 0.5 : 1 }}
         >

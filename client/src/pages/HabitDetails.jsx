@@ -120,7 +120,7 @@ export default function HabitDetails() {
                         {log.status}
                       </span>
                       {log.value !== null && log.value !== undefined && (
-                        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Value: {log.value}</p>
+                        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Value: {log.value}{habit.unit ? ` ${habit.unit}` : ''}</p>
                       )}
                     </div>
                   </div>

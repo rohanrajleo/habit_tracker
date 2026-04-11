@@ -28,6 +28,70 @@ function formatLocalDate(date) {
 // AUTH MIDDLEWARE
 // ---------------------------------------------------------------------
 
+const backfillPromises = new Map();
+
+async function backfillMissedLogs(userId) {
+  try {
+    const { data: habits } = await supabase
+      .from("habits")
+      .select("id, created_at")
+      .eq("user_id", userId);
+      
+    if (!habits || habits.length === 0) return;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    // Limit backfill to 14 days ago max
+    const minDate = new Date(today);
+    minDate.setDate(minDate.getDate() - 14);
+
+    const minDateStr = formatLocalDate(minDate);
+    
+    // Fetch logs from the last 14 days to see what's missing
+    const { data: recentLogs } = await supabase
+      .from("habit_logs")
+      .select("habit_id, date")
+      .in("habit_id", habits.map(h => h.id))
+      .gte("date", minDateStr);
+      
+    const logMap = new Set((recentLogs || []).map(l => `${l.habit_id}_${l.date}`));
+    const logsToInsert = [];
+
+    for (const habit of habits) {
+      let startDate = new Date(habit.created_at);
+      startDate.setHours(0, 0, 0, 0);
+      if (startDate < minDate) {
+        startDate = new Date(minDate);
+      }
+      
+      let currDate = new Date(startDate);
+      while (currDate <= yesterday) {
+        const dateStr = formatLocalDate(currDate);
+        if (!logMap.has(`${habit.id}_${dateStr}`)) {
+          logsToInsert.push({
+            habit_id: habit.id,
+            date: dateStr,
+            status: 'missed'
+          });
+        }
+        currDate.setDate(currDate.getDate() + 1);
+      }
+    }
+
+    if (logsToInsert.length > 0) {
+      // Chunk inserts in case of large payload
+      for (let i = 0; i < logsToInsert.length; i += 50) {
+        await supabase.from("habit_logs").upsert(logsToInsert.slice(i, i + 50), { onConflict: "habit_id, date" });
+      }
+    }
+  } catch (err) {
+    console.error("Backfill logic error:", err);
+  }
+}
+
 const verifyUser = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -43,6 +107,21 @@ const verifyUser = async (req, res, next) => {
     }
 
     req.user = user;
+
+    // Run backfill once per day for GET requests (excluding auth routes)
+    if (req.method === 'GET' && !req.path.startsWith('/auth')) {
+      const todayStr = getLocalDate();
+      const key = `${user.id}_${todayStr}`;
+      if (!backfillPromises.has(key)) {
+        backfillPromises.set(key, backfillMissedLogs(user.id));
+      }
+      try {
+        await backfillPromises.get(key);
+      } catch (e) {
+        console.error("Backfill failed", e);
+      }
+    }
+
     next();
   } catch (err) {
     return res.status(500).json({ success: false, error: "Auth verification failed" });
@@ -147,15 +226,15 @@ app.get("/habits/:id", verifyUser, async (req, res) => {
 
 app.post("/habits", verifyUser, async (req, res) => {
   try {
-    const { title, description, type, category, target_value, unit, allow_skip } = req.body;
+    const { title, description, type, category, target_value, unit } = req.body;
 
     if (!title || !type) {
       return res.status(400).json({ success: false, error: "Title and type are required" });
     }
 
-    const validTypes = ["binary", "measurable", "duration"];
+    const validTypes = ["binary", "measurable"];
     if (!validTypes.includes(type)) {
-      return res.status(400).json({ success: false, error: "Invalid type. Allowed: binary, measurable, duration" });
+      return res.status(400).json({ success: false, error: "Invalid type. Allowed: binary, measurable" });
     }
 
     const validCategories = ["health", "fitness", "learning", "mindfulness"];
@@ -174,7 +253,7 @@ app.post("/habits", verifyUser, async (req, res) => {
         category: cat,
         target_value: target_value || null,
         unit: unit || null,
-        allow_skip: allow_skip !== undefined ? allow_skip : true
+        allow_skip: false
       }])
       .select()
       .single();
@@ -234,9 +313,9 @@ app.post("/logs", verifyUser, async (req, res) => {
       return res.status(400).json({ success: false, error: "habitId and status are required" });
     }
 
-    const validStatuses = ["done", "skipped", "missed"];
+    const validStatuses = ["done", "missed"];
     if (!validStatuses.includes(status)) {
-      return res.status(400).json({ success: false, error: "Invalid status. Allowed: done, skipped, missed" });
+      return res.status(400).json({ success: false, error: "Invalid status. Allowed: done, missed" });
     }
 
     // Verify habit ownership

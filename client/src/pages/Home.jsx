@@ -6,7 +6,7 @@ import * as api from '../api';
 import { getLocalDate } from '../lib/utils';
 
 export default function Home() {
-  const { habits, profile, loading, error, isHabitDoneToday, refreshHabits } = useHabits();
+  const { habits, todayLogs, profile, loading, error, isHabitDoneToday, refreshHabits } = useHabits();
   const navigate = useNavigate();
   const [submittingId, setSubmittingId] = useState(null);
 
@@ -46,8 +46,11 @@ export default function Home() {
     }
   };
 
-  const doneCount = habits.filter(h => isHabitDoneToday(h.id)).length;
   const totalCount = habits.length;
+  const doneCount = habits.filter(h => isHabitDoneToday(h.id)).length;
+  const loggedHabitIds = new Set(todayLogs.map(l => l.habit_id));
+  const loggedCount = loggedHabitIds.size;
+  const pendingCount = totalCount - loggedCount;
 
   return (
     <div className="page-container">
@@ -67,7 +70,7 @@ export default function Home() {
         </div>
         <div>
           <h3 style={{ margin: 0 }}>{doneCount} of {totalCount} done</h3>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>{totalCount - doneCount} habits remaining</p>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>{pendingCount} habits pending</p>
         </div>
       </div>
 

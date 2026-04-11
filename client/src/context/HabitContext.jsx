@@ -1,6 +1,7 @@
 import { createContext, useState, useContext, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import * as api from '../api';
+import { getLocalDate } from '../lib/utils';
 
 const HabitContext = createContext();
 
@@ -43,6 +44,35 @@ export function HabitProvider({ children }) {
   useEffect(() => {
     fetchAllData();
   }, [fetchAllData]);
+
+  // Midnight reset: detect date change and refresh all data
+  useEffect(() => {
+    if (!user) return;
+    let lastDate = getLocalDate();
+
+    const interval = setInterval(() => {
+      const currentDate = getLocalDate();
+      if (currentDate !== lastDate) {
+        lastDate = currentDate;
+        fetchAllData();
+      }
+    }, 30000);
+
+    // Also refresh when tab regains focus (stale tab fix)
+    const handleFocus = () => {
+      const currentDate = getLocalDate();
+      if (currentDate !== lastDate) {
+        lastDate = currentDate;
+      }
+      fetchAllData();
+    };
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [user, fetchAllData]);
 
   // Check if a specific habit has been logged today
   const isHabitDoneToday = useCallback((habitId) => {

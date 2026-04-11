@@ -12,7 +12,7 @@ export default function LogHabit() {
 
   const habit = habits.find(h => h.id === id);
 
-  // Use the exact DB enum values directly: 'done', 'skipped', 'missed'
+  // Use the exact DB enum values: 'done', 'missed'
   const [status, setStatus] = useState('done');
   const [value, setValue] = useState('');
   const [note, setNote] = useState('');
@@ -26,7 +26,7 @@ export default function LogHabit() {
 
       const payload = {
         habitId: habit.id,
-        status, // already a valid DB enum: 'done' | 'skipped' | 'missed'
+        status, // valid DB enum: 'done' | 'missed'
         date: getLocalDate(),
         note: note || null
       };
@@ -69,7 +69,7 @@ export default function LogHabit() {
 
       <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-muted)', margin: '24px 0 12px', letterSpacing: 1 }}>How did it go?</h4>
       <div className="flex-row gap-2">
-        {['done', 'skipped', 'missed'].map(s => (
+        {['done', 'missed'].map(s => (
           <div
             key={s}
             className={`chip ${status === s ? 'active' : ''}`}
@@ -84,21 +84,16 @@ export default function LogHabit() {
       {habit.type !== 'binary' && status === 'done' && (
         <>
           <h4 style={{ fontSize: 12, textTransform: 'uppercase', color: 'var(--text-muted)', margin: '24px 0 12px', letterSpacing: 1 }}>
-            {habit.type === 'duration' ? 'Duration (minutes)' : 'Value Achieved'}
+            Value {habit.unit ? `(${habit.unit})` : ''}
           </h4>
           <input
             type="number"
             className="input-field"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder={habit.type === 'duration' ? 'e.g. 30' : 'Enter number'}
+            placeholder={habit.unit ? `e.g. 30 ${habit.unit}` : 'Enter number'}
             min="0"
           />
-          {habit.type === 'duration' && value && (
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-              = {Math.floor(Number(value) / 60)}h {Number(value) % 60}m
-            </p>
-          )}
         </>
       )}
 
